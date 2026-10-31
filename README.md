@@ -2,7 +2,7 @@
 
 A daily money tracker with a white cat that reacts to your spending, now built with **React + TypeScript + Vite**.
 
-**Live app:** https://money-tracker-cat.netlify.app
+**Live app:** https://money-tracker-cat.pavankl275.workers.dev/
 
 ## What's new in v2
 - Vertical side menu (with logo and a menu button) on desktop and phones
