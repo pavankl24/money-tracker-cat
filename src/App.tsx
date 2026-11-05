@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import type { PointerEvent, ReactNode } from 'react'
 import { useRegisterSW } from 'virtual:pwa-register/react'
+import type { User } from '@supabase/supabase-js'
+import { isCloudState, mergeStates, supabase } from './cloud'
 
 type Kind = 'in' | 'out'
 type Tx = { id: number; type: Kind; amt: number; note: string; date: string }
@@ -14,6 +16,7 @@ type Flash = { mood: Mood; msg: string; act?: Act }
 type Fmt = (n: number) => string
 
 const KEY = 'daily-money-tracker-v1' // same key as v1 so existing data carries over
+const CLOUD_OWNER_KEY = `${KEY}:cloud-owner`
 const VERSION = '2.1.0'
 const DEF: St = { limit: 0, cur: '₹', name: '', theme: '', tx: [] }
 const VIEWS: View[] = ['dashboard', 'transactions', 'preferences']
@@ -29,8 +32,8 @@ const mkFmt = (cur: string): Fmt => n => cur + new Intl.NumberFormat(cur === '�
 const fdate = (d: Date, o?: Intl.DateTimeFormatOptions) => d.toLocaleDateString('en-IN', o ?? { day: 'numeric', month: 'short', year: 'numeric' })
 const poseFor = (h: number): Pose => (h >= 22 || h < 6 ? 'sleep' : h >= 18 ? 'sit' : 'stand')
 
-function load(): St {
-  try { const p = JSON.parse(localStorage.getItem(KEY) || 'null'); if (p && Array.isArray(p.tx)) return { ...DEF, ...p } } catch { /* ignore */ }
+function load(storageKey = KEY): St {
+  try { const p = JSON.parse(localStorage.getItem(storageKey) || 'null'); if (p && Array.isArray(p.tx)) return { ...DEF, ...p } } catch { /* ignore */ }
   return DEF
 }
 function calc(S: St, now: Date) {
@@ -330,7 +333,35 @@ function Transactions({ S, c, fmt, setS, toast }: { S: St; c: Calc; fmt: Fmt; se
     {ask && <div className="confirm" role="alert"><span>Delete all {S.tx.length} transactions? This can’t be undone.</span><button className="pill danger" type="button" onClick={() => { setS(s => ({ ...s, tx: [] })); setAsk(false); toast('ok', 'All transactions cleared') }}>Yes, reset</button><button className="pill ghost" type="button" onClick={() => setAsk(false)}>Cancel</button></div>}
     <div className="tw"><table><thead><tr><th>Activity</th><th>Date</th><th className="r">Amount</th><th /></tr></thead><tbody>{rows.length ? rows : <tr><td colSpan={4} className="empty">No transactions to show.</td></tr>}</tbody></table></div></div>
 }
-function Prefs({ S, update, toast }: { S: St; update: (p: Partial<St>) => void; toast: (k: ToastT['kind'], t: string, m?: string) => void }) {
+type CloudStatus = 'unconfigured' | 'signed-out' | 'loading' | 'synced' | 'saving' | 'error'
+function CloudAccount({ user, status, message, onSignOut }: { user: User | null; status: CloudStatus; message: string; onSignOut: () => void }) {
+  const [email, setEmail] = useState('')
+  const [sent, setSent] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState('')
+  const label = status === 'loading' ? 'Loading your cloud data…' : status === 'saving' ? 'Saving changes…' : status === 'synced' ? 'Your data is backed up and synced.' : status === 'error' ? message : 'Your data is stored on this device.'
+  const sendLink = async () => {
+    if (!supabase) return
+    setBusy(true); setErr('')
+    const { error } = await supabase.auth.signInWithOtp({ email: email.trim(), options: { emailRedirectTo: window.location.origin } })
+    setBusy(false)
+    if (error) setErr(error.message)
+    else setSent(true)
+  }
+  return <div className="card f cloud-card"><h2>Cloud backup</h2><p className="mu" style={{ margin: 0 }}>{label}</p>
+    {!supabase ? <p className="mu" style={{ margin: 0 }}>Add your Supabase project URL and publishable key to the Cloudflare environment variables to enable secure sync.</p> : user ? <>
+      <p style={{ margin: 0 }}>Signed in as <b>{user.email}</b></p>
+      <button className="pill ghost" type="button" onClick={onSignOut}>Sign out on this device</button>
+    </> : <>
+      <label htmlFor="cloud-email">Email for a secure sign-in link</label>
+      <input id="cloud-email" type="email" autoComplete="email" placeholder="you@example.com" value={email} onChange={e => { setEmail(e.target.value); setSent(false) }} />
+      <button className="pill wide" type="button" disabled={busy || !email.trim()} onClick={sendLink}>{busy ? 'Sending…' : 'Email me a sign-in link'}</button>
+      {sent && <p className="mu" role="status" style={{ margin: 0 }}>Check your email and open the sign-in link on this device. Your existing transactions will be merged into the account.</p>}
+      {err && <p className="err" role="alert">{err}</p>}
+    </>}
+  </div>
+}
+function Prefs({ S, update, toast, user, cloudStatus, cloudMessage, onSignOut }: { S: St; update: (p: Partial<St>) => void; toast: (k: ToastT['kind'], t: string, m?: string) => void; user: User | null; cloudStatus: CloudStatus; cloudMessage: string; onSignOut: () => void }) {
   const [name, setName] = useState(S.name), [cur, setCur] = useState(S.cur), [lim, setLim] = useState(S.limit ? String(S.limit) : '')
   return <div style={{ display: 'grid', gap: 14, maxWidth: 480 }}>
     <div className="card f"><h2>Your daily limit</h2>
@@ -341,7 +372,8 @@ function Prefs({ S, update, toast }: { S: St; update: (p: Partial<St>) => void; 
       <label htmlFor="nm">Your name (the cat will use it)</label><input id="nm" type="text" maxLength={24} placeholder="Your name" value={name} onChange={e => setName(e.target.value)} />
       <label htmlFor="cu">Currency</label><select id="cu" value={cur} onChange={e => setCur(e.target.value)}>{['₹', '$', '€', '£'].map(x => <option key={x}>{x}</option>)}</select>
       <button className="pill wide" type="button" onClick={() => { update({ name: name.trim(), cur }); toast('ok', 'Saved', 'Your preferences were updated.') }}>Save</button></div>
-    <p className="mu" style={{ margin: 0 }}>Version {VERSION}. When a new version is ready, an Update button appears at the top of the app. Your data stays on this device.</p>
+    <CloudAccount user={user} status={cloudStatus} message={cloudMessage} onSignOut={onSignOut} />
+    <p className="mu" style={{ margin: 0 }}>Version {VERSION}. Your device keeps a local copy. When cloud sync is enabled, your signed-in data is also backed up to your Supabase account.</p>
   </div>
 }
 function UpdatePrompt() {
@@ -358,6 +390,12 @@ const NAV: { v: View; label: string; icon: ReactNode }[] = [
 export default function App() {
   const wide = () => matchMedia('(min-width:900px)').matches
   const [S, setS] = useState<St>(load)
+  const [cloudUser, setCloudUser] = useState<User | null>(null)
+  const [cloudStatus, setCloudStatus] = useState<CloudStatus>(supabase ? 'signed-out' : 'unconfigured')
+  const [cloudMessage, setCloudMessage] = useState('')
+  const cloudReady = useRef(false)
+  const cloudUserId = useRef<string | null>(null)
+  const cloudTimer = useRef<number>()
   const [view, setView] = useState<View>(() => { const h = location.hash.slice(1) as View; return VIEWS.includes(h) ? h : 'dashboard' })
   const [open, setOpen] = useState(wide)
   const [now, setNow] = useState(new Date())
@@ -366,7 +404,70 @@ export default function App() {
   const ft = useRef<number>()
   const fmt = mkFmt(S.cur), c = calc(S, now)
   const update = (p: Partial<St>) => setS(s => ({ ...s, ...p }))
-  useEffect(() => { try { localStorage.setItem(KEY, JSON.stringify(S)) } catch { /* ignore */ } }, [S])
+  useEffect(() => {
+    if (supabase && cloudUser && !cloudReady.current) return
+    const storageKey = cloudUser ? `${KEY}:user:${cloudUser.id}` : KEY
+    try { localStorage.setItem(storageKey, JSON.stringify(S)) } catch { /* ignore */ }
+  }, [S, cloudUser])
+  useEffect(() => {
+    const client = supabase
+    if (!client) return
+    let alive = true
+    const loadUserData = async (user: User) => {
+      if (cloudUserId.current === user.id && cloudReady.current) return
+      cloudUserId.current = user.id
+      cloudReady.current = false
+      setCloudStatus('loading'); setCloudMessage('')
+      const { data, error } = await client.from('user_data').select('app_state').eq('user_id', user.id).maybeSingle()
+      if (!alive || cloudUserId.current !== user.id) return
+      if (error) {
+        setCloudMessage('Could not load cloud data. Check that you ran supabase/schema.sql and then sign in again.')
+        setCloudStatus('error'); cloudReady.current = false
+        return
+      }
+      const owner = localStorage.getItem(CLOUD_OWNER_KEY)
+      const cacheKey = `${KEY}:user:${user.id}`
+      const deviceState = load(cacheKey)
+      // Only the first account claimed on this browser inherits its old
+      // anonymous data. Other accounts get their own local and cloud state.
+      const localForAccount = owner === null || owner === user.id
+        ? mergeStates(load(), deviceState)
+        : deviceState
+      if (owner === null) localStorage.setItem(CLOUD_OWNER_KEY, user.id)
+      cloudReady.current = true
+      setS(isCloudState(data?.app_state) ? mergeStates(localForAccount, data.app_state) : localForAccount)
+      setCloudStatus('synced')
+    }
+    const { data: { subscription } } = client.auth.onAuthStateChange((_event, session) => {
+      if (!alive) return
+      const user = session?.user ?? null
+      setCloudUser(user)
+      if (user) window.setTimeout(() => { if (alive) void loadUserData(user) }, 0)
+      else {
+        cloudUserId.current = null; cloudReady.current = false
+        setS(load())
+        setCloudStatus('signed-out')
+      }
+    })
+    void client.auth.getSession().then(({ data, error }) => {
+      if (!alive) return
+      if (error) { setCloudMessage(error.message); setCloudStatus('error'); return }
+      if (data.session?.user) void loadUserData(data.session.user)
+    })
+    return () => { alive = false; subscription.unsubscribe(); window.clearTimeout(cloudTimer.current) }
+  }, [])
+  useEffect(() => {
+    if (!supabase || !cloudUser || !cloudReady.current) return
+    window.clearTimeout(cloudTimer.current)
+    cloudTimer.current = window.setTimeout(async () => {
+      if (!supabase || !cloudReady.current || cloudUserId.current !== cloudUser.id) return
+      setCloudStatus('saving')
+      const { error } = await supabase.from('user_data').upsert({ user_id: cloudUser.id, app_state: S, updated_at: new Date().toISOString() })
+      if (error) { setCloudMessage('Cloud save failed. Your local copy is safe; check your connection and Supabase table setup.'); setCloudStatus('error') }
+      else setCloudStatus('synced')
+    }, 800)
+    return () => window.clearTimeout(cloudTimer.current)
+  }, [S, cloudUser])
   useEffect(() => { if (S.theme) document.documentElement.dataset.theme = S.theme; else delete document.documentElement.dataset.theme }, [S.theme])
   useEffect(() => { const t = setInterval(() => setNow(new Date()), 60000); return () => clearInterval(t) }, [])
   useEffect(() => { const f = () => { const h = location.hash.slice(1) as View; if (VIEWS.includes(h)) setView(h) }; addEventListener('hashchange', f); return () => removeEventListener('hashchange', f) }, [])
@@ -410,7 +511,7 @@ export default function App() {
           <button className="chip" type="button" onClick={() => update({ theme: dark ? 'light' : 'dark' })}>{dark ? 'Light mode' : 'Dark mode'}</button></div>
         {view === 'dashboard' && <Dashboard S={S} c={c} now={now} fmt={fmt} flash={flash} flashIt={flashIt} addTx={addTx} go={go} update={update} />}
         {view === 'transactions' && <Transactions S={S} c={c} fmt={fmt} setS={setS} toast={toast} />}
-        {view === 'preferences' && <Prefs S={S} update={update} toast={toast} />}
+        {view === 'preferences' && <Prefs S={S} update={update} toast={toast} user={cloudUser} cloudStatus={cloudStatus} cloudMessage={cloudMessage} onSignOut={() => { void supabase?.auth.signOut() }} />}
       </main>
       <div className="toasts" aria-live="polite">{toasts.map(t => <div key={t.id} className={'toast ' + t.kind} role={t.kind === 'ok' ? 'status' : 'alert'} onClick={() => setToasts(a => a.filter(x => x.id !== t.id))}><b>{t.title}</b>{t.msg && <span>{t.msg}</span>}</div>)}</div>
       <UpdatePrompt />
