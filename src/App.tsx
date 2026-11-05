@@ -377,8 +377,17 @@ function Prefs({ S, update, toast, user, cloudStatus, cloudMessage, onSignOut }:
   </div>
 }
 function UpdatePrompt() {
-  const { needRefresh: [need], updateServiceWorker } = useRegisterSW({ onRegisteredSW(_u, r) { if (r) setInterval(() => { r.update() }, 60 * 60 * 1000) } })
-  return need ? <div className="upd" role="status">New version available<button type="button" onClick={() => updateServiceWorker(true)}>Update</button></div> : null
+  const interval = useRef<number>()
+  const [dismissed, setDismissed] = useState(false)
+  const [updating, setUpdating] = useState(false)
+  const { needRefresh: [need], updateServiceWorker } = useRegisterSW({ onRegisteredSW(_u, r) { if (r) { window.clearInterval(interval.current); interval.current = window.setInterval(() => { void r.update() }, 60 * 60 * 1000) } } })
+  useEffect(() => () => window.clearInterval(interval.current), [])
+  if (!need || dismissed) return null
+  return <aside className="upd" role="status" aria-live="polite" aria-label="App update available">
+    <span className="upd-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M20 7v5h-5M4.8 9a7.5 7.5 0 0 1 12.7-2L20 12M4 17v-5h5m10.2 3a7.5 7.5 0 0 1-12.7 2L4 12" /></svg></span>
+    <span className="upd-copy"><b>Update ready</b><span>A new version of Money Cat is available.</span></span>
+    <span className="upd-actions"><button className="upd-later" type="button" onClick={() => setDismissed(true)}>Later</button><button className="upd-now" type="button" disabled={updating} onClick={() => { setUpdating(true); updateServiceWorker(true) }}>{updating ? 'Updating…' : 'Update now'}</button></span>
+  </aside>
 }
 
 /* ---------- App shell ---------- */
